@@ -1,3 +1,4 @@
+
 import os
 import time
 import threading
@@ -13,11 +14,9 @@ COOLDOWN_SECONDS = 15 * 60
 
 URL_TELEGRAM = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# Bybit API v5
 URL_BYBIT_4H  = "https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval=240&limit=200"
 URL_BYBIT_15M = "https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval=15&limit=200"
 
-# Binance API (fallback)
 URL_BINANCE_4H  = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=200"
 URL_BINANCE_15M = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=200"
 
@@ -41,23 +40,23 @@ def send_telegram(text_message):
     try:
         r = requests.post(URL_TELEGRAM, json=payload, timeout=15)
         if r.status_code != 200:
-            print(f"❌ Telegram: {r.text}")
+            print(f"❌ Telegram: {r.text}", flush=True)
         else:
-            print("✅ Сообщение отправлено в Telegram")
+            print("✅ Сообщение отправлено в Telegram", flush=True)
     except Exception as e:
-        print(f"❌ Ошибка сети Telegram: {e}")
+        print(f"❌ Ошибка сети Telegram: {e}", flush=True)
 
-# === ПОЛУЧЕНИЕ ДАННЫХ: СНАЧАЛА BYBIT, ПОТОМ BINANCE ===
+# === BYBIT ===
 def get_data_from_bybit(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=6)
         if response.status_code != 200:
-            print(f"⚠️ Bybit HTTP {response.status_code}")
+            print(f"⚠️ Bybit HTTP {response.status_code}", flush=True)
             return None
         data = response.json()
         if data.get('retCode') != 0 or 'result' not in data:
-            print(f"⚠️ Bybit error: {data.get('retMsg', '?')}")
+            print(f"⚠️ Bybit error: {data.get('retMsg', '?')}", flush=True)
             return None
         rows = data['result']['list']
         if not rows:
@@ -70,21 +69,20 @@ def get_data_from_bybit(url):
         volumes = [float(x[5]) for x in rows]
         return opens, highs, lows, closes, volumes
     except Exception as e:
-        print(f"⚠️ Bybit exception: {e}")
+        print(f"⚠️ Bybit exception: {e}", flush=True)
         return None
 
-
+# === BINANCE ===
 def get_data_from_binance(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
-            print(f"⚠️ Binance HTTP {response.status_code}")
+            print(f"⚠️ Binance HTTP {response.status_code}", flush=True)
             return None
         rows = response.json()
         if not rows:
             return None
-        # Binance: [openTime, open, high, low, close, volume, closeTime, ...]
         opens   = [float(x[1]) for x in rows]
         highs   = [float(x[2]) for x in rows]
         lows    = [float(x[3]) for x in rows]
@@ -92,25 +90,24 @@ def get_data_from_binance(url):
         volumes = [float(x[5]) for x in rows]
         return opens, highs, lows, closes, volumes
     except Exception as e:
-        print(f"⚠️ Binance exception: {e}")
+        print(f"⚠️ Binance exception: {e}", flush=True)
         return None
 
-
+# === ОБЩАЯ ФУНКЦИЯ: СНАЧАЛА BYBIT, ПОТОМ BINANCE ===
 def get_market_data(url_bybit, url_binance, tf_label):
-    """Пытается Bybit, если не вышло — Binance."""
-    print(f"🔄 Запрос данных {tf_label} с Bybit...")
+    print(f"🔄 {tf_label}: пробую Bybit...", flush=True)
     data = get_data_from_bybit(url_bybit)
     if data:
-        print(f"✅ {tf_label}: получены данные с Bybit")
+        print(f"✅ {tf_label}: данные с Bybit", flush=True)
         return data
 
-    print(f"🔄 Bybit недоступен, пробую Binance...")
+    print(f"🔄 {tf_label}: Bybit не дал данных, пробую Binance...", flush=True)
     data = get_data_from_binance(url_binance)
     if data:
-        print(f"✅ {tf_label}: получены данные с Binance")
+        print(f"✅ {tf_label}: данные с Binance", flush=True)
         return data
 
-    print(f"❌ {tf_label}: ни Bybit, ни Binance не ответили")
+    print(f"❌ {tf_label}: ни Bybit, ни Binance не ответили", flush=True)
     return None
 
 # === RSI ===
@@ -132,7 +129,7 @@ def calc_rsi(closes, period=14):
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
-# === CMF ===
+# === CMF (объём Чайкина) ===
 def calc_cmf(highs, lows, closes, volumes, period=20):
     if len(closes) < period + 1:
         return 0.0
@@ -145,21 +142,30 @@ def calc_cmf(highs, lows, closes, volumes, period=20):
     vol_sum = sum(volumes[-period:])
     return mf_sum / vol_sum if vol_sum != 0 else 0.0
 
-# === ОПИСАНИЯ ===
+# === ОПИСАНИЯ ИНДИКАТОРОВ ===
 def describe_rsi(value, tf):
-    if value >= 70: return f"RSI {tf} = {value:.1f} → ⚠️ перекупленность"
-    elif value <= 30: return f"RSI {tf} = {value:.1f} → ✅ перепроданность"
-    elif value > 50: return f"RSI {tf} = {value:.1f} → 📈 бычий"
-    else: return f"RSI {tf} = {value:.1f} → 📉 медвежий"
+    if value >= 70:
+        return f"RSI {tf} = {value:.1f} → ⚠️ перекупленность"
+    elif value <= 30:
+        return f"RSI {tf} = {value:.1f} → ✅ перепроданность"
+    elif value > 50:
+        return f"RSI {tf} = {value:.1f} → 📈 бычий"
+    else:
+        return f"RSI {tf} = {value:.1f} → 📉 медвежий"
 
 def describe_cmf(value, tf):
-    if value > 0.05: return f"CMF {tf} = {value:+.3f} → 🐋 сильный приток"
-    elif value > 0.01: return f"CMF {tf} = {value:+.3f} → 🐋 умеренный приток"
-    elif value < -0.05: return f"CMF {tf} = {value:+.3f} → 🐋 сильный отток"
-    elif value < -0.01: return f"CMF {tf} = {value:+.3f} → 🐋 умеренный отток"
-    else: return f"CMF {tf} = {value:+.3f} → 🐋 нейтрально"
+    if value > 0.05:
+        return f"CMF {tf} = {value:+.3f} → 🐋 сильный приток"
+    elif value > 0.01:
+        return f"CMF {tf} = {value:+.3f} → 🐋 умеренный приток"
+    elif value < -0.05:
+        return f"CMF {tf} = {value:+.3f} → 🐋 сильный отток"
+    elif value < -0.01:
+        return f"CMF {tf} = {value:+.3f} → 🐋 умеренный отток"
+    else:
+        return f"CMF {tf} = {value:+.3f} → 🐋 нейтрально"
 
-# === ЛОГИКА ===
+# === ЛОГИКА РЕКОМЕНДАЦИЙ ===
 def build_recommendation(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price):
     if rsi_4h > 50 and cmf_4h > 0:
         trend = "📈 РАСТУЩИЙ"
@@ -185,22 +191,33 @@ def build_recommendation(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price):
     )
 
     if buy_condition:
-        return "BUY", ("🟢 *РЕКОМЕНДАЦИЯ: ПОКУПАТЬ (BUY)*\n" + block +
-                       "\n🎯 *RSI 4Н бычий + RSI 15М перепродан + CMF заходит*")
+        return "BUY", (
+            "🟢 *РЕКОМЕНДАЦИЯ: ПОКУПАТЬ (BUY)*\n"
+            + block +
+            "\n🎯 *RSI 4Н бычий + RSI 15М перепродан + CMF заходит*"
+        )
 
     if sell_condition:
-        return "SELL", ("🔴 *РЕКОМЕНДАЦИЯ: ПРОДАВАТЬ (SELL)*\n" + block +
-                        "\n🎯 *RSI 4Н медвежий + RSI 15М перекуплен + CMF выходит*")
+        return "SELL", (
+            "🔴 *РЕКОМЕНДАЦИЯ: ПРОДАВАТЬ (SELL)*\n"
+            + block +
+            "\n🎯 *RSI 4Н медвежий + RSI 15М перекуплен + CMF выходит*"
+        )
 
     return "WAIT", "⏸ Ждать\n" + block
 
-# === ГЛАВНЫЙ ЦИКЛ ===
+# === ГЛАВНЫЙ ЦИКЛ АНАЛИЗА ===
 def main_analysis():
+    print("▶️ main_analysis() начался", flush=True)
+
+    print("🔄 Запрос данных 4H...", flush=True)
     data_4h  = get_market_data(URL_BYBIT_4H,  URL_BINANCE_4H,  "4H")
+
+    print("🔄 Запрос данных 15M...", flush=True)
     data_15m = get_market_data(URL_BYBIT_15M, URL_BINANCE_15M, "15M")
 
     if not data_4h or not data_15m:
-        print("⏳ Нет данных ни с Bybit, ни с Binance")
+        print("⏳ Нет данных ни с Bybit, ни с Binance", flush=True)
         return
 
     rsi_4h  = calc_rsi(data_4h[3])
@@ -211,16 +228,19 @@ def main_analysis():
 
     decision, text = build_recommendation(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price)
 
-    print(f"[{datetime.now():%H:%M:%S}] BTC ${price:.1f} | "
-          f"RSI15 {rsi_15m:.1f} | RSI4H {rsi_4h:.1f} | "
-          f"CMF15 {cmf_15m:+.3f} | → {decision}")
+    print(
+        f"[{datetime.now():%H:%M:%S}] BTC ${price:.1f} | "
+        f"RSI15 {rsi_15m:.1f} | RSI4H {rsi_4h:.1f} | "
+        f"CMF15 {cmf_15m:+.3f} | CMF4H {cmf_4h:+.3f} | → {decision}",
+        flush=True
+    )
 
     if decision == "WAIT":
         return
 
     now = time.time()
     if now - last_signal_time[decision] < COOLDOWN_SECONDS:
-        print(f"⏱ {decision} недавно — пропуск")
+        print(f"⏱ {decision} недавно — пропуск", flush=True)
         return
 
     send_telegram(text)
@@ -228,13 +248,20 @@ def main_analysis():
 
 # === СТАРТ ===
 if __name__ == "__main__":
-    print("🚀 Бот Торгаш запущен на Render...")
-    send_telegram("🚀 *Бот Торгаш запущен в облаке Render!*\n\n"
-                  "Работаю 24/7. Источники данных: Bybit + Binance (резерв).")
+    print("🚀 Бот Торгаш запущен на Render...", flush=True)
+    send_telegram(
+        "🚀 *Бот Торгаш запущен в облаке Render!*\n\n"
+        "Работаю 24/7. Источники данных: Bybit + Binance (резерв)."
+    )
+
+    print("🧵 Запускаю Flask-поток...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
+
+    print("🔁 Вхожу в бесконечный цикл анализа...", flush=True)
     while True:
         try:
             main_analysis()
         except Exception as e:
-            print(f"❌ Ошибка в цикле: {e}")
+            print(f"❌ Ошибка в цикле: {e}", flush=True)
+        print(f"😴 Пауза {INTERVAL_SECONDS} секунд...", flush=True)
         time.sleep(INTERVAL_SECONDS)
