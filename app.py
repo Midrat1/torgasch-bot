@@ -14,11 +14,9 @@ COOLDOWN_SECONDS = 15 * 60
 
 URL_TELEGRAM = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-URL_BYBIT_4H  = "https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval=240&limit=200"
-URL_BYBIT_15M = "https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval=15&limit=200"
-
-URL_BINANCE_4H  = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=200"
-URL_BINANCE_15M = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=200"
+# OKX — единственный источник данных (не блокирует облака)
+URL_OKX_4H  = "https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=4H&limit=200"
+URL_OKX_15M = "https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=15m&limit=200"
 
 last_signal_time = {"BUY": 0, "SELL": 0}
 
@@ -46,69 +44,35 @@ def send_telegram(text_message):
     except Exception as e:
         print(f"❌ Ошибка сети Telegram: {e}", flush=True)
 
-# === BYBIT ===
-def get_data_from_bybit(url):
+# === OKX ===
+def get_data_from_okx(url, tf_label):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=6)
+        response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
-            print(f"⚠️ Bybit HTTP {response.status_code}", flush=True)
+            print(f"⚠️ OKX {tf_label} HTTP {response.status_code}", flush=True)
             return None
         data = response.json()
-        if data.get('retCode') != 0 or 'result' not in data:
-            print(f"⚠️ Bybit error: {data.get('retMsg', '?')}", flush=True)
+        if data.get("code") != "0" or "data" not in data:
+            print(f"⚠️ OKX {tf_label} error: {data.get('msg', '?')}", flush=True)
             return None
-        rows = data['result']['list']
+        rows = data["data"]
         if not rows:
+            print(f"⚠️ OKX {tf_label}: пустой список", flush=True)
             return None
+        # OKX отдаёт свечи от новых к старым, разворачиваем
         rows.reverse()
+        # OKX: [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
         opens   = [float(x[1]) for x in rows]
         highs   = [float(x[2]) for x in rows]
         lows    = [float(x[3]) for x in rows]
         closes  = [float(x[4]) for x in rows]
         volumes = [float(x[5]) for x in rows]
+        print(f"✅ OKX {tf_label}: получено {len(closes)} свечей", flush=True)
         return opens, highs, lows, closes, volumes
     except Exception as e:
-        print(f"⚠️ Bybit exception: {e}", flush=True)
+        print(f"⚠️ OKX {tf_label} exception: {e}", flush=True)
         return None
-
-# === BINANCE ===
-def get_data_from_binance(url):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            print(f"⚠️ Binance HTTP {response.status_code}", flush=True)
-            return None
-        rows = response.json()
-        if not rows:
-            return None
-        opens   = [float(x[1]) for x in rows]
-        highs   = [float(x[2]) for x in rows]
-        lows    = [float(x[3]) for x in rows]
-        closes  = [float(x[4]) for x in rows]
-        volumes = [float(x[5]) for x in rows]
-        return opens, highs, lows, closes, volumes
-    except Exception as e:
-        print(f"⚠️ Binance exception: {e}", flush=True)
-        return None
-
-# === ОБЩАЯ ФУНКЦИЯ: СНАЧАЛА BYBIT, ПОТОМ BINANCE ===
-def get_market_data(url_bybit, url_binance, tf_label):
-    print(f"🔄 {tf_label}: пробую Bybit...", flush=True)
-    data = get_data_from_bybit(url_bybit)
-    if data:
-        print(f"✅ {tf_label}: данные с Bybit", flush=True)
-        return data
-
-    print(f"🔄 {tf_label}: Bybit не дал данных, пробую Binance...", flush=True)
-    data = get_data_from_binance(url_binance)
-    if data:
-        print(f"✅ {tf_label}: данные с Binance", flush=True)
-        return data
-
-    print(f"❌ {tf_label}: ни Bybit, ни Binance не ответили", flush=True)
-    return None
 
 # === RSI ===
 def calc_rsi(closes, period=14):
@@ -206,18 +170,18 @@ def build_recommendation(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price):
 
     return "WAIT", "⏸ Ждать\n" + block
 
-# === ГЛАВНЫЙ ЦИКЛ АНАЛИЗА ===
+# === ГЛАВНЫЙ ЦИКЛ ===
 def main_analysis():
     print("▶️ main_analysis() начался", flush=True)
 
-    print("🔄 Запрос данных 4H...", flush=True)
-    data_4h  = get_market_data(URL_BYBIT_4H,  URL_BINANCE_4H,  "4H")
+    print("🔄 Запрос данных 4H с OKX...", flush=True)
+    data_4h = get_data_from_okx(URL_OKX_4H, "4H")
 
-    print("🔄 Запрос данных 15M...", flush=True)
-    data_15m = get_market_data(URL_BYBIT_15M, URL_BINANCE_15M, "15M")
+    print("🔄 Запрос данных 15M с OKX...", flush=True)
+    data_15m = get_data_from_okx(URL_OKX_15M, "15M")
 
     if not data_4h or not data_15m:
-        print("⏳ Нет данных ни с Bybit, ни с Binance", flush=True)
+        print("⏳ Нет данных с OKX", flush=True)
         return
 
     rsi_4h  = calc_rsi(data_4h[3])
@@ -251,7 +215,7 @@ if __name__ == "__main__":
     print("🚀 Бот Торгаш запущен на Render...", flush=True)
     send_telegram(
         "🚀 *Бот Торгаш запущен в облаке Render!*\n\n"
-        "Работаю 24/7. Источники данных: Bybit + Binance (резерв)."
+        "Работаю 24/7. Источник данных: OKX."
     )
 
     print("🧵 Запускаю Flask-поток...", flush=True)
