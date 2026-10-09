@@ -9,19 +9,18 @@ from flask import Flask
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
 CHAT_ID   = os.environ.get("CHAT_ID", "465503608")
 
-INTERVAL_SECONDS     = 180      # цикл анализа: каждые 3 минуты
-COOLDOWN_SECONDS     = 15 * 60  # антиспам для BUY/SELL: 15 минут
-FLAT_REPORT_SECONDS  = 30 * 60  # отчёт о флете: раз в 30 минут
+INTERVAL_SECONDS     = 180
+COOLDOWN_SECONDS     = 15 * 60
+FLAT_REPORT_SECONDS  = 30 * 60
 
 URL_TELEGRAM = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 URL_OKX_4H  = "https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=4H&limit=200"
 URL_OKX_15M = "https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=15m&limit=200"
 
-# Храним время последних отправок и предыдущее состояние тренда
 last_signal_time  = {"BUY": 0, "SELL": 0}
 last_flat_report  = 0
-last_trend_state  = None   # "BULL" / "BEAR" / "FLAT"
+last_trend_state  = None
 
 # === FLASK для Render ===
 app = Flask(__name__)
@@ -107,6 +106,52 @@ def calc_cmf(highs, lows, closes, volumes, period=20):
     vol_sum = sum(volumes[-period:])
     return mf_sum / vol_sum if vol_sum != 0 else 0.0
 
+# === EMA (для MACD) ===
+def calc_ema(values, period):
+    if len(values) < period:
+        return [values[-1]] * len(values)
+    k = 2.0 / (period + 1)
+    ema = [sum(values[:period]) / period]
+    for i in range(period, len(values)):
+        ema.append(values[i] * k + ema[-1] * (1 - k))
+    return ema
+
+# === MACD (12, 26, 9) ===
+def calc_macd(closes):
+    if len(closes) < 35:
+        return 0.0, 0.0, 0.0, 0.0
+
+    ema12 = calc_ema(closes, 12)
+    ema26 = calc_ema(closes, 26)
+
+    # Выравниваем длины (ema12 короче, т.к. период меньше)
+    offset = len(ema12) - len(ema26)
+    ema12_aligned = ema12[offset:]
+
+    macd_line = [ema12_aligned[i] - ema26[i] for i in range(len(ema26))]
+    signal_line = calc_ema(macd_line, 9)
+
+    # Выравниваем histogram
+    offset2 = len(macd_line) - len(signal_line)
+    histogram = [macd_line[offset2 + i] - signal_line[i] for i in range(len(signal_line))]
+
+    if len(histogram) < 2:
+        return 0.0, 0.0, 0.0, 0.0
+
+    return macd_line[-1], signal_line[-1], histogram[-1], histogram[-2]
+
+def describe_macd(macd, signal, hist, prev_hist):
+    if hist > 0 and hist > prev_hist:
+        return f"MACD {macd:+.1f} → 📈 растёт (бычий импульс)"
+    elif hist > 0 and hist <= prev_hist:
+        return f"MACD {macd:+.1f} → ↗️ растёт, но замедляется"
+    elif hist < 0 and hist < prev_hist:
+        return f"MACD {macd:+.1f} → 📉 падает (медвежий импульс)"
+    elif hist < 0 and hist >= prev_hist:
+        return f"MACD {macd:+.1f} → ↘️ падает, но замедляется"
+    else:
+        return f"MACD {macd:+.1f} → ➡️ нейтрально"
+
 # === ОПИСАНИЯ ===
 def describe_rsi(value, tf):
     if value >= 70:  return f"RSI {tf} = {value:.1f} → ⚠️ перекупленность"
@@ -115,27 +160,42 @@ def describe_rsi(value, tf):
     else:            return f"RSI {tf} = {value:.1f} → 📉 медвежий"
 
 def describe_cmf(value, tf):
-    if value > 0.05:   return f"CMF {tf} = {value:+.3f} → 🐋 сильный приток"
-    elif value > 0.01: return f"CMF {tf} = {value:+.3f} → 🐋 умеренный приток"
+    if value > 0.05:    return f"CMF {tf} = {value:+.3f} → 🐋 сильный приток"
+    elif value > 0.01:  return f"CMF {tf} = {value:+.3f} → 🐋 умеренный приток"
     elif value < -0.05: return f"CMF {tf} = {value:+.3f} → 🐋 сильный отток"
     elif value < -0.01: return f"CMF {tf} = {value:+.3f} → 🐋 умеренный отток"
-    else:              return f"CMF {tf} = {value:+.3f} → 🐋 нейтрально"
+    else:               return f"CMF {tf} = {value:+.3f} → 🐋 нейтрально"
 
-# === ОПРЕДЕЛЕНИЕ РЫНОЧНОГО СОСТОЯНИЯ ===
-def detect_market_state(rsi_4h, cmf_4h):
-    """Определяет тренд/флет по старшему таймфрейму."""
-    if rsi_4h > 55 and cmf_4h > 0.01:
+# === СОСТОЯНИЕ РЫНКА ===
+def detect_market_state(rsi_4h, cmf_4h, macd_4h_hist):
+    if rsi_4h > 55 and cmf_4h > 0.01 and macd_4h_hist > 0:
         return "BULL", "📈 Бычий тренд"
-    if rsi_4h < 45 and cmf_4h < -0.01:
+    if rsi_4h < 45 and cmf_4h < -0.01 and macd_4h_hist < 0:
         return "BEAR", "📉 Медвежий тренд"
     return "FLAT", "➡️ Флет / боковик"
 
-# === ЛОГИКА СИГНАЛОВ ===
-def build_recommendation(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price):
-    state_code, state_text = detect_market_state(rsi_4h, cmf_4h)
+# === ЛОГИКА СИГНАЛОВ (УЖЕСТОЧЕННАЯ) ===
+def build_recommendation(rsi_4h, cmf_4h, rsi_15m, cmf_15m,
+                          macd_15m, macd_15m_signal, macd_15m_hist, macd_15m_prev_hist,
+                          macd_4h_hist, price):
+    state_code, state_text = detect_market_state(rsi_4h, cmf_4h, macd_4h_hist)
 
-    buy_condition  = rsi_4h > 48 and rsi_15m < 33 and cmf_15m > 0.01
-    sell_condition = rsi_4h < 52 and rsi_15m > 67 and cmf_15m < -0.01
+    # Ужесточённые условия с MACD
+    buy_condition = (
+        rsi_4h > 48 and              # старший тренд бычий
+        rsi_15m < 30 and             # глубоко перепродан (было 33)
+        cmf_15m > 0.02 and           # приток капитала (было 0.01)
+        macd_15m_hist > macd_15m_prev_hist and   # импульс растёт
+        macd_15m_hist > -0.5         # не глубоко в минусе
+    )
+
+    sell_condition = (
+        rsi_4h < 52 and              # старший тренд медвежий
+        rsi_15m > 70 and             # глубоко перекуплен (было 67)
+        cmf_15m < -0.02 and          # отток капитала (было -0.01)
+        macd_15m_hist < macd_15m_prev_hist and   # импульс падает
+        macd_15m_hist < 0.5          # не глубоко в плюсе
+    )
 
     block = (
         f"\n💵 *Цена BTC:* ${price:.2f}\n"
@@ -147,31 +207,44 @@ def build_recommendation(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price):
         f"\n*🐋 ОБЪЁМ ЧАЙКИНА CMF (20)*\n"
         f"• {describe_cmf(cmf_15m, '15М')}\n"
         f"• {describe_cmf(cmf_4h,  '4Н')}\n"
+        f"\n*⚡ MACD (12,26,9)*\n"
+        f"• 15М: {describe_macd(macd_15m, macd_15m_signal, macd_15m_hist, macd_15m_prev_hist)}\n"
+        f"• 4Н:  гистограмма {macd_4h_hist:+.2f}\n"
         f"━━━━━━━━━━━━━━━\n"
     )
 
     if buy_condition:
         return "BUY", state_code, (
             "🟢 *РЕКОМЕНДАЦИЯ: ПОКУПАТЬ (BUY)*\n" + block +
-            "\n🎯 *RSI 4Н бычий + RSI 15М перепродан + CMF заходит*"
+            "\n🎯 *ВСЕ 3 ИНДИКАТОРА СОВПАЛИ:*\n"
+            "• RSI 4Н бычий\n"
+            "• RSI 15М < 30 (глубокая перепроданность)\n"
+            "• CMF 15М > 0.02 (капитал заходит)\n"
+            "• MACD 15М — импульс растёт"
         )
 
     if sell_condition:
         return "SELL", state_code, (
             "🔴 *РЕКОМЕНДАЦИЯ: ПРОДАВАТЬ (SELL)*\n" + block +
-            "\n🎯 *RSI 4Н медвежий + RSI 15М перекуплен + CMF выходит*"
+            "\n🎯 *ВСЕ 3 ИНДИКАТОРА СОВПАЛИ:*\n"
+            "• RSI 4Н медвежий\n"
+            "• RSI 15М > 70 (глубокая перекупленность)\n"
+            "• CMF 15М < -0.02 (капитал выходит)\n"
+            "• MACD 15М — импульс падает"
         )
 
     return "WAIT", state_code, "⏸ Ждать\n" + block
 
 # === ОТЧЁТ О ФЛЕТЕ ===
-def send_flat_report(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price):
+def send_flat_report(rsi_4h, cmf_4h, rsi_15m, cmf_15m,
+                      macd_15m, macd_15m_signal, macd_15m_hist, macd_15m_prev_hist,
+                      macd_4h_hist, price):
     global last_flat_report
     now = time.time()
     if now - last_flat_report < FLAT_REPORT_SECONDS:
         return
 
-    _, state_text = detect_market_state(rsi_4h, cmf_4h)
+    _, state_text = detect_market_state(rsi_4h, cmf_4h, macd_4h_hist)
 
     text = (
         "💤 *Рынок во флете — сигналов нет*\n\n"
@@ -184,14 +257,17 @@ def send_flat_report(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price):
         f"\n*🐋 ОБЪЁМ ЧАЙКИНА CMF (20)*\n"
         f"• {describe_cmf(cmf_15m, '15М')}\n"
         f"• {describe_cmf(cmf_4h,  '4Н')}\n"
+        f"\n*⚡ MACD (12,26,9)*\n"
+        f"• 15М: {describe_macd(macd_15m, macd_15m_signal, macd_15m_hist, macd_15m_prev_hist)}\n"
+        f"• 4Н:  гистограмма {macd_4h_hist:+.2f}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"\n🤖 *Бот работает, жду чёткого сигнала.*\n"
+        f"\n🤖 *Бот работает по 3 индикаторам, жду сигнала.*\n"
         f"⏱ _Следующий отчёт через 30 минут._"
     )
     send_telegram(text)
     last_flat_report = now
 
-# === УВЕДОМЛЕНИЕ О СМЕНЕ ТРЕНДА ===
+# === СМЕНА ТРЕНДА ===
 def check_trend_change(state_code):
     global last_trend_state
     if last_trend_state is None:
@@ -201,13 +277,13 @@ def check_trend_change(state_code):
     if state_code != last_trend_state:
         if state_code == "BULL":
             send_telegram("🔄 *СМЕНА ТРЕНДА:* медвежий ➡️ *бычий*\n\n"
-                          "Старший ТФ (4Н) разворачивается вверх. Ждём откат для BUY.")
+                          "RSI + CMF + MACD на 4Н подтверждают разворот вверх.")
         elif state_code == "BEAR":
             send_telegram("🔄 *СМЕНА ТРЕНДА:* бычий ➡️ *медвежий*\n\n"
-                          "Старший ТФ (4Н) разворачивается вниз. Ждём отскок для SELL.")
+                          "RSI + CMF + MACD на 4Н подтверждают разворот вниз.")
         elif state_code == "FLAT":
             send_telegram("🔄 *СМЕНА ТРЕНДА:* рынок ушёл в *флет*\n\n"
-                          "Чёткого направления нет. Ждём выхода из боковика.")
+                          "Три индикатора не дают согласованного сигнала.")
         last_trend_state = state_code
 
 # === ГЛАВНЫЙ ЦИКЛ ===
@@ -221,26 +297,39 @@ def main_analysis():
         print("⏳ Нет данных с OKX", flush=True)
         return
 
+    # RSI
     rsi_4h  = calc_rsi(data_4h[3])
     rsi_15m = calc_rsi(data_15m[3])
+
+    # CMF
     cmf_4h  = calc_cmf(data_4h[1], data_4h[2], data_4h[3], data_4h[4])
     cmf_15m = calc_cmf(data_15m[1], data_15m[2], data_15m[3], data_15m[4])
-    price   = data_15m[3][-1]
 
-    decision, state_code, text = build_recommendation(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price)
+    # MACD
+    macd_15m, macd_15m_signal, macd_15m_hist, macd_15m_prev_hist = calc_macd(data_15m[3])
+    _, _, macd_4h_hist, _ = calc_macd(data_4h[3])
+
+    price = data_15m[3][-1]
+
+    decision, state_code, text = build_recommendation(
+        rsi_4h, cmf_4h, rsi_15m, cmf_15m,
+        macd_15m, macd_15m_signal, macd_15m_hist, macd_15m_prev_hist,
+        macd_4h_hist, price
+    )
 
     print(
         f"[{datetime.now():%H:%M:%S}] BTC ${price:.1f} | "
         f"RSI15 {rsi_15m:.1f} | RSI4H {rsi_4h:.1f} | "
         f"CMF15 {cmf_15m:+.3f} | CMF4H {cmf_4h:+.3f} | "
+        f"MACD15 {macd_15m_hist:+.2f} | MACD4H {macd_4h_hist:+.2f} | "
         f"{state_code} | → {decision}",
         flush=True
     )
 
-    # 1. Проверяем смену тренда
+    # Смена тренда
     check_trend_change(state_code)
 
-    # 2. Сигналы BUY/SELL (с антиспамом)
+    # Сигналы
     if decision in ("BUY", "SELL"):
         now = time.time()
         if now - last_signal_time[decision] < COOLDOWN_SECONDS:
@@ -250,21 +339,28 @@ def main_analysis():
             last_signal_time[decision] = now
         return
 
-    # 3. Если WAIT и состояние FLAT — шлём отчёт о флете раз в 30 минут
+    # Отчёт о флете
     if decision == "WAIT" and state_code == "FLAT":
-        send_flat_report(rsi_4h, cmf_4h, rsi_15m, cmf_15m, price)
+        send_flat_report(
+            rsi_4h, cmf_4h, rsi_15m, cmf_15m,
+            macd_15m, macd_15m_signal, macd_15m_hist, macd_15m_prev_hist,
+            macd_4h_hist, price
+        )
 
 # === СТАРТ ===
 if __name__ == "__main__":
     print("🚀 Бот Торгаш запущен на Render...", flush=True)
     send_telegram(
-        "🚀 *Бот Торгаш запущен в облаке Render!*\n\n"
-        "🔧 *Работаю по RSI + CMF на 15М и 4Н.*\n\n"
-        "📩 *Что буду присылать:*\n"
-        "• 🟢 BUY / 🔴 SELL — когда оба индикатора совпадут\n"
-        "• 💤 Отчёт о флете — раз в 30 минут, если рынок стоит\n"
-        "• 🔄 Смену тренда — когда старший ТФ разворачивается\n\n"
-        "Проверяю рынок каждые 3 минуты. Работаю 24/7."
+        "🚀 *Бот Торгаш запущен (обновление!)*\n\n"
+        "🔧 *Теперь работаю по 3 индикаторам:*\n"
+        "• 📊 RSI (14) — перепроданность/перекупленность\n"
+        "• 🐋 CMF (20) — потоки капитала (объём Чайкина)\n"
+        "• ⚡ MACD (12,26,9) — импульс и разворот тренда\n\n"
+        "🎯 *Условия стали строже:*\n"
+        "• RSI 15М < 30 или > 70\n"
+        "• CMF 15М > +0.02 или < -0.02\n"
+        "• MACD 15М подтверждает импульс\n\n"
+        "📩 Сигналы будут реже, но точнее."
     )
 
     print("🧵 Запускаю Flask-поток...", flush=True)
