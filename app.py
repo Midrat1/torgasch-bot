@@ -11,25 +11,24 @@ CHAT_ID   = os.environ.get("CHAT_ID", "465503608")
 
 INTERVAL_SECONDS     = 180
 COOLDOWN_SECONDS     = 15 * 60
-FLAT_REPORT_SECONDS  = 60 * 60  # отчёт раз в час
+FLAT_REPORT_SECONDS  = 60 * 60
 
 URL_TELEGRAM = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# Binance API (Render его не блокирует, если использовать VPN на телефоне для загрузки, но на Render — прямой доступ)
-# Binance доступен с Render без VPN (Render использует американские IP)
-BINANCE_1H  = "https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1h&limit=500"
-BINANCE_1D  = "https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1d&limit=300"
+# OKX — работает с Render без блокировок
+OKX_1H = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=1H&limit=500"
+OKX_1D = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=1D&limit=300"
 
 # === ПАРАМЕТРЫ СТРАТЕГИИ ===
-RSI_TREND_BULL = 50      # RSI 1D должен быть выше этого
-RSI_ENTRY_BUY  = 35      # RSI 1H должен быть ниже этого
-CMF_BUY        = 0.01    # CMF 1H должен быть выше этого
-EMA_PERIOD     = 200     # EMA на 1D
+RSI_TREND_BULL = 50
+RSI_ENTRY_BUY  = 35
+CMF_BUY        = 0.01
+EMA_PERIOD     = 200
 
 last_signal_time = {"BUY": 0}
 last_flat_report = 0
-last_trend_state = None
-last_ema_state   = None  # "above" / "below"
+last_ema_state   = None
+
 
 # === FLASK ===
 app = Flask(__name__)
@@ -52,31 +51,36 @@ def send_telegram(text_message):
         if r.status_code != 200:
             print(f"❌ Telegram: {r.text}", flush=True)
         else:
-            print("✅ Сообщение отправлено в Telegram", flush=True)
+            print("✅ Сообщение отправлено", flush=True)
     except Exception as e:
-        print(f"❌ Ошибка сети Telegram: {e}", flush=True)
+        print(f"❌ Ошибка Telegram: {e}", flush=True)
 
 
-# === ЗАГРУЗКА ДАННЫХ ===
-def fetch_binance(url, label):
+# === OKX ===
+def fetch_okx(url, label):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=15)
         if r.status_code != 200:
-            print(f"⚠️ Binance {label} HTTP {r.status_code}", flush=True)
+            print(f"⚠️ OKX {label} HTTP {r.status_code}", flush=True)
             return None
-        rows = r.json()
+        data = r.json()
+        if data.get("code") != "0" or "data" not in data:
+            print(f"⚠️ OKX {label} error: {data.get('msg', '?')}", flush=True)
+            return None
+        rows = data["data"]
         if not rows:
             return None
+        rows.reverse()
         opens   = [float(x[1]) for x in rows]
         highs   = [float(x[2]) for x in rows]
         lows    = [float(x[3]) for x in rows]
         closes  = [float(x[4]) for x in rows]
         volumes = [float(x[5]) for x in rows]
-        print(f"✅ Binance {label}: получено {len(closes)} свечей", flush=True)
+        print(f"✅ OKX {label}: получено {len(closes)} свечей", flush=True)
         return opens, highs, lows, closes, volumes
     except Exception as e:
-        print(f"⚠️ Binance {label} exception: {e}", flush=True)
+        print(f"⚠️ OKX {label} exception: {e}", flush=True)
         return None
 
 
@@ -122,7 +126,6 @@ def calc_ema(closes, period=200):
     return ema
 
 
-# === ОПИСАНИЯ ===
 def describe_rsi(value, tf):
     if value >= 70:   return f"RSI {tf} = {value:.1f} → ⚠️ перекупленность"
     elif value <= 30: return f"RSI {tf} = {value:.1f} → ✅ перепроданность"
@@ -138,27 +141,21 @@ def describe_cmf(value, tf):
     else:               return f"CMF {tf} = {value:+.3f} → 🐋 нейтрально"
 
 
-# === ЛОГИКА СИГНАЛА ===
 def check_signal(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
-    """Проверяет все условия для BUY."""
     if ema_200 is None:
         return False, "EMA 200 не рассчитана"
-
     conditions = {
         "RSI 1D > 50":  rsi_1d > RSI_TREND_BULL,
         "RSI 1H < 35":  rsi_1h < RSI_ENTRY_BUY,
         "CMF 1H > 0.01": cmf_1h > CMF_BUY,
         "Цена > EMA 200": price > ema_200,
     }
-
     if all(conditions.values()):
-        return True, "все условия выполнены"
-
+        return True, "все условия"
     failed = [k for k, v in conditions.items() if not v]
-    return False, f"не выполнено: {', '.join(failed)}"
+    return False, f"нет: {', '.join(failed)}"
 
 
-# === СМЕНА EMA-СОСТОЯНИЯ ===
 def check_ema_state(price, ema_200):
     global last_ema_state
     if ema_200 is None:
@@ -170,33 +167,28 @@ def check_ema_state(price, ema_200):
     if current != last_ema_state:
         if current == "above":
             send_telegram(
-                f"🚀 *ETH ПРОБИЛ EMA 200 (1D) СНИЗУ ВВЕРХ*\n\n"
+                f"🚀 *ETH ПРОБИЛ EMA 200 (1D) ВВЕРХ*\n\n"
                 f"💵 Цена: ${price:.2f}\n"
                 f"📊 EMA 200: ${ema_200:.2f}\n\n"
-                f"✅ *Бычий тренд активирован* — бот начнёт искать BUY-сигналы.\n"
-                f"📈 _Именно в таких условиях стратегия даёт +200%+._"
+                f"✅ *Бычий тренд активирован.*"
             )
         else:
             send_telegram(
                 f"⚠️ *ETH УПАЛ НИЖЕ EMA 200 (1D)*\n\n"
                 f"💵 Цена: ${price:.2f}\n"
                 f"📊 EMA 200: ${ema_200:.2f}\n\n"
-                f"🛑 *Бычий тренд сломан* — бот приостанавливает BUY-сигналы.\n"
-                f"💤 _Жду возврата выше EMA 200._"
+                f"🛑 *BUY-сигналы приостановлены.*"
             )
         last_ema_state = current
 
 
-# === ОТЧЁТ О ФЛЕТЕ ===
 def send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
     global last_flat_report
     now = time.time()
     if now - last_flat_report < FLAT_REPORT_SECONDS:
         return
-
     above_ema = "✅ выше" if ema_200 and price > ema_200 else "❌ ниже"
     ema_str = f"${ema_200:.2f}" if ema_200 else "?"
-
     text = (
         "💤 *ETH — сигналов нет*\n\n"
         f"💵 *Цена ETH:* ${price:.2f}\n"
@@ -208,8 +200,7 @@ def send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
         f"\n*🐋 CMF (20)*\n"
         f"• {describe_cmf(cmf_1h, '1H')}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"\n🤖 _Бот работает. Жду сигнала._\n"
-        f"⏱ _Следующий отчёт через час._"
+        f"\n🤖 _Следующий отчёт через час._"
     )
     send_telegram(text)
     last_flat_report = now
@@ -217,10 +208,10 @@ def send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
 
 # === ГЛАВНЫЙ ЦИКЛ ===
 def main_analysis():
-    print("▶️ main_analysis() начался", flush=True)
+    print("▶️ main_analysis()", flush=True)
 
-    data_1h = fetch_binance(BINANCE_1H, "1H")
-    data_1d = fetch_binance(BINANCE_1D, "1D")
+    data_1h = fetch_okx(OKX_1H, "1H")
+    data_1d = fetch_okx(OKX_1D, "1D")
     if not data_1h or not data_1d:
         print("⏳ Нет данных", flush=True)
         return
@@ -232,11 +223,10 @@ def main_analysis():
     price   = data_1h[3][-1]
 
     if ema_200 is None:
-        print("⚠️ EMA 200 не рассчитана (мало данных)", flush=True)
+        print("⚠️ EMA 200 не рассчитана", flush=True)
         return
 
     above_ema = "ВЫШЕ" if price > ema_200 else "НИЖЕ"
-
     print(
         f"[{datetime.now():%H:%M:%S}] ETH ${price:.2f} | "
         f"RSI1H {rsi_1h:.1f} | RSI1D {rsi_1d:.1f} | "
@@ -244,10 +234,8 @@ def main_analysis():
         flush=True
     )
 
-    # Проверка смены тренда по EMA 200
     check_ema_state(price, ema_200)
 
-    # Проверка сигнала
     is_signal, reason = check_signal(rsi_1h, rsi_1d, cmf_1h, price, ema_200)
 
     if is_signal:
@@ -256,7 +244,7 @@ def main_analysis():
             print(f"⏱ BUY недавно — пропуск", flush=True)
             return
 
-        target = price * 1.02  # цель +2% за 48ч
+        target = price * 1.02
         text = (
             f"🟢 *РЕКОМЕНДАЦИЯ: ПОКУПАТЬ ETH*\n\n"
             f"💵 *Цена входа:* ${price:.2f}\n"
@@ -268,20 +256,19 @@ def main_analysis():
             f"• {describe_rsi(rsi_1d, '1D')}\n"
             f"\n*🐋 CMF (20)*\n"
             f"• {describe_cmf(cmf_1h, '1H')}\n"
-            f"\n*📈 EMA 200 (1D):* ${ema_200:.2f} ✅ цена выше\n"
+            f"\n*📈 EMA 200 (1D):* ${ema_200:.2f} ✅\n"
             f"━━━━━━━━━━━━━━━\n"
             f"\n🎯 *ВСЕ УСЛОВИЯ ВЫПОЛНЕНЫ:*\n"
             f"• RSI 1D > 50 — старший тренд бычий\n"
-            f"• RSI 1H < 35 — краткосрочная перепроданность\n"
+            f"• RSI 1H < 35 — перепроданность\n"
             f"• CMF 1H > 0.01 — капитал заходит\n"
             f"• Цена > EMA 200 — глобальный тренд вверх\n\n"
-            f"📊 _Winrate стратегии: 59.5%_"
+            f"📊 _Winrate: 59.5%_"
         )
         send_telegram(text)
         last_signal_time["BUY"] = now
         return
 
-    # Отчёт о флете (раз в час)
     send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200)
 
 
@@ -289,29 +276,19 @@ def main_analysis():
 if __name__ == "__main__":
     print("🚀 ETH-бот запущен на Render...", flush=True)
     send_telegram(
-        "🚀 *ETH-бот запущен!*\n\n"
+        "🎯 *Shooter: ETH-бот запущен!*\n\n"
         "🔧 *Стратегия:*\n"
         "• Монета: ETH/USDT\n"
         "• Индикаторы: RSI + CMF + EMA 200\n"
         "• Таймфреймы: 1H + 1D\n"
         "• Сигналы: только BUY\n"
         "• Горизонт: 48 часов\n\n"
-        "📊 *Результаты бэктеста (3.4 года):*\n"
-        "• Winrate: 59.5%\n"
-        "• Net прибыль: +232%\n"
-        "• Все годы в плюсе ✅\n\n"
-        "🎯 *Когда бот даёт сигнал:*\n"
-        "• ETH выше EMA 200 (1D) — бычий тренд\n"
-        "• RSI 1D > 50 — старший тренд вверх\n"
-        "• RSI 1H < 35 — краткосрочная перепроданность\n"
-        "• CMF 1H > 0.01 — приток капитала\n\n"
-        "💡 _Бот автоматически приостановит сигналы, если ETH упадёт ниже EMA 200._"
+        "📊 *Бэктест (3.4 года):* Winrate 59.5%, +232%\n"
+        "✅ *Все годы в плюсе*"
     )
-
-    print("🧵 Запускаю Flask-поток...", flush=True)
+    print("🧵 Flask-поток...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
-
-    print("🔁 Вхожу в бесконечный цикл анализа...", flush=True)
+    print("🔁 Цикл анализа...", flush=True)
     while True:
         try:
             main_analysis()
