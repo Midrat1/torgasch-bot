@@ -9,7 +9,7 @@ from flask import Flask
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
 CHAT_ID   = os.environ.get("CHAT_ID", "465503608")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1001182337455")
-CHANNEL_LINK = "t.me/shooter_eth_signals"
+CHANNEL_LINK = "t.me/shooter\\_eth\\_signals"
 BOT_LINK = "@Torkasch_bot"
 
 INTERVAL_SECONDS        = 180
