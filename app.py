@@ -53,9 +53,10 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 
+# === TELEGRAM (HTML вместо Markdown) ===
 def send_telegram(text, target=None):
     chat = target or CHAT_ID
-    payload = {"chat_id": chat, "text": text, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat, "text": text, "parse_mode": "HTML"}
     try:
         r = requests.post(URL_TELEGRAM, json=payload, timeout=15)
         if r.status_code != 200:
@@ -72,6 +73,7 @@ def send_to_channel(text):
     return send_telegram(text, target=CHANNEL_ID)
 
 
+# === OKX ===
 def fetch_okx(url, label):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -98,6 +100,7 @@ def fetch_okx(url, label):
         return None
 
 
+# === ИНДИКАТОРЫ ===
 def calc_rsi(closes, period=14):
     if len(closes) < period + 1:
         return 50.0
@@ -203,7 +206,7 @@ def check_active_trades(current_price):
             exit_time = datetime.now().strftime("%d.%m %H:%M")
 
             text = (
-                f"{emoji} *СДЕЛКА ЗАКРЫТА {label}*\n\n"
+                f"{emoji} <b>СДЕЛКА ЗАКРЫТА {label}</b>\n\n"
                 f"🟢 BUY ETH\n"
                 f"📅 Открыта: {entry_time}\n"
                 f"📅 Закрыта: {exit_time}\n\n"
@@ -212,7 +215,7 @@ def check_active_trades(current_price):
                 f"📊 P&L: {pnl_net:+.2f}%\n"
                 f"⏱ Удержание: 48ч\n\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"📊 *ОБЩАЯ СТАТИСТИКА:*\n"
+                f"📊 <b>ОБЩАЯ СТАТИСТИКА:</b>\n"
                 f"• Всего: {total}\n"
                 f"• Прибыльных: {closed_stats['wins']}\n"
                 f"• Убыточных: {closed_stats['losses']}\n"
@@ -223,7 +226,7 @@ def check_active_trades(current_price):
             send_telegram(text)
 
             channel_text = (
-                f"{emoji} *Сделка закрыта {label}*\n\n"
+                f"{emoji} <b>Сделка закрыта {label}</b>\n\n"
                 f"🟢 BUY ETH: ${entry:.2f} → ${current_price:.2f}\n"
                 f"📊 P&L: {pnl_net:+.2f}%\n\n"
                 f"📈 Всего сделок: {total} | Winrate: {winrate:.1f}%\n\n"
@@ -247,18 +250,18 @@ def check_ema_state(price, ema_200):
     if current != last_ema_state:
         if current == "above":
             msg = (
-                f"🚀 *ETH ПРОБИЛ EMA 200 (1D) ВВЕРХ*\n\n"
+                f"🚀 <b>ETH ПРОБИЛ EMA 200 (1D) ВВЕРХ</b>\n\n"
                 f"💵 Цена: ${price:.2f}\n"
                 f"📊 EMA 200: ${ema_200:.2f}\n\n"
-                f"✅ *Бычий тренд активирован.*\n\n"
+                f"✅ <b>Бычий тренд активирован.</b>\n\n"
                 f"🤖 Бот: {BOT_LINK}"
             )
         else:
             msg = (
-                f"⚠️ *ETH УПАЛ НИЖЕ EMA 200 (1D)*\n\n"
+                f"⚠️ <b>ETH УПАЛ НИЖЕ EMA 200 (1D)</b>\n\n"
                 f"💵 Цена: ${price:.2f}\n"
                 f"📊 EMA 200: ${ema_200:.2f}\n\n"
-                f"🛑 *BUY-сигналы приостановлены.*\n\n"
+                f"🛑 <b>BUY-сигналы приостановлены.</b>\n\n"
                 f"🤖 Бот: {BOT_LINK}"
             )
         send_telegram(msg)
@@ -274,14 +277,14 @@ def send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
     above_ema = "✅ выше" if ema_200 and price > ema_200 else "❌ ниже"
     ema_str = f"${ema_200:.2f}" if ema_200 else "?"
     text = (
-        "💤 *ETH — сигналов нет*\n\n"
-        f"💵 *Цена ETH:* ${price:.2f}\n"
-        f"📊 *EMA 200 (1D):* {ema_str} ({above_ema})\n"
+        "💤 <b>ETH — сигналов нет</b>\n\n"
+        f"💵 <b>Цена ETH:</b> ${price:.2f}\n"
+        f"📊 <b>EMA 200 (1D):</b> {ema_str} ({above_ema})\n"
         f"\n━━━━━━━━━━━━━━━\n"
-        f"*📊 RSI (14)*\n"
+        f"<b>📊 RSI (14)</b>\n"
         f"• {describe_rsi(rsi_1h, '1H')}\n"
         f"• {describe_rsi(rsi_1d, '1D')}\n"
-        f"\n*🐋 CMF (20)*\n"
+        f"\n<b>🐋 CMF (20)</b>\n"
         f"• {describe_cmf(cmf_1h)}\n"
         f"━━━━━━━━━━━━━━━\n"
         f"\n📢 Канал: {CHANNEL_LINK}"
@@ -307,15 +310,15 @@ def send_channel_update(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
         mood = "⚪️ Нейтральный"
 
     text = (
-        f"📊 *ETH — обзор рынка*\n"
+        f"📊 <b>ETH — обзор рынка</b>\n"
         f"{datetime.now().strftime('%d.%m %H:%M')}\n\n"
-        f"💵 *Цена:* ${price:.2f}\n"
-        f"📊 *EMA 200 (1D):* {ema_str} {above}\n\n"
-        f"*📈 RSI (14):*\n"
+        f"💵 <b>Цена:</b> ${price:.2f}\n"
+        f"📊 <b>EMA 200 (1D):</b> {ema_str} {above}\n\n"
+        f"<b>📈 RSI (14):</b>\n"
         f"• 1H: {rsi_1h:.1f}\n"
         f"• 1D: {rsi_1d:.1f}\n\n"
-        f"*🐋 CMF (20) 1H:* {cmf_1h:+.3f}\n\n"
-        f"*Настроение:* {mood}\n\n"
+        f"<b>🐋 CMF (20) 1H:</b> {cmf_1h:+.3f}\n\n"
+        f"<b>Настроение:</b> {mood}\n\n"
         f"🎯 Сигналов нет. Бот ждёт условий.\n\n"
         f"🤖 Личные сигналы: {BOT_LINK}"
     )
@@ -332,7 +335,7 @@ def send_weekly_report():
     total = closed_stats["total"]
     if total == 0:
         text = (
-            "📊 *Недельная сводка*\n\n"
+            "📊 <b>Недельная сводка</b>\n\n"
             "За неделю сигналов не было.\n"
             "Бот продолжает ждать условий.\n\n"
             f"🤖 Бот: {BOT_LINK}"
@@ -340,7 +343,7 @@ def send_weekly_report():
     else:
         winrate = closed_stats["wins"] / total * 100
         text = (
-            f"📊 *Недельная сводка*\n\n"
+            f"📊 <b>Недельная сводка</b>\n\n"
             f"• Сделок: {total}\n"
             f"• Прибыльных: {closed_stats['wins']}\n"
             f"• Убыточных: {closed_stats['losses']}\n"
@@ -393,21 +396,21 @@ def main_analysis():
 
         target = price * 1.02
         text = (
-            f"🟢 *РЕКОМЕНДАЦИЯ: ПОКУПАТЬ ETH*\n\n"
-            f"💵 *Цена входа:* ${price:.2f}\n"
-            f"🎯 *Цель (48ч):* ${target:.2f} (+2%)\n"
-            f"⛔ *Стоп-лосс:* ${price * 0.98:.2f} (−2%)\n"
-            f"⏱ *Горизонт:* 48 часов\n"
-            f"📊 *Размер:* 5% от депозита\n\n"
+            f"🟢 <b>РЕКОМЕНДАЦИЯ: ПОКУПАТЬ ETH</b>\n\n"
+            f"💵 <b>Цена входа:</b> ${price:.2f}\n"
+            f"🎯 <b>Цель (48ч):</b> ${target:.2f} (+2%)\n"
+            f"⛔ <b>Стоп-лосс:</b> ${price * 0.98:.2f} (−2%)\n"
+            f"⏱ <b>Горизонт:</b> 48 часов\n"
+            f"📊 <b>Размер:</b> 5% от депозита\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"*📊 RSI (14)*\n"
+            f"<b>📊 RSI (14)</b>\n"
             f"• {describe_rsi(rsi_1h, '1H')}\n"
             f"• {describe_rsi(rsi_1d, '1D')}\n"
-            f"\n*🐋 CMF (20)*\n"
+            f"\n<b>🐋 CMF (20)</b>\n"
             f"• {describe_cmf(cmf_1h)}\n"
-            f"\n*📈 EMA 200 (1D):* ${ema_200:.2f} ✅\n"
+            f"\n<b>📈 EMA 200 (1D):</b> ${ema_200:.2f} ✅\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"\n🎯 *ВСЕ УСЛОВИЯ ВЫПОЛНЕНЫ*\n"
+            f"\n🎯 <b>ВСЕ УСЛОВИЯ ВЫПОЛНЕНЫ</b>\n"
             f"📊 Winrate: 59.5%\n\n"
             f"📢 Канал: {CHANNEL_LINK}"
         )
@@ -431,11 +434,11 @@ def main_analysis():
 if __name__ == "__main__":
     print("🚀 Shooter запущен на Render...", flush=True)
     send_telegram(
-        "🎯 *Shooter запущен!*\n\n"
-        "🔧 *Стратегия:* ETH / RSI + CMF + EMA 200\n"
-        "📊 *Winrate:* 59.5% (3.4 года)\n"
-        "📈 *Результат:* +232%\n\n"
-        "📩 *Что присылаю:*\n"
+        "🎯 <b>Shooter запущен!</b>\n\n"
+        "🔧 <b>Стратегия:</b> ETH / RSI + CMF + EMA 200\n"
+        "📊 <b>Winrate:</b> 59.5% (3.4 года)\n"
+        "📈 <b>Результат:</b> +232%\n\n"
+        "📩 <b>Что присылаю:</b>\n"
         "• 🟢 BUY-сигналы с правилами\n"
         "• ✅ Результат каждой сделки\n"
         "• 💤 Отчёты о рынке раз в 4 часа\n"
@@ -445,14 +448,14 @@ if __name__ == "__main__":
 
     print(f"📢 Канал: {CHANNEL_ID}", flush=True)
     send_to_channel(
-        "🎯 *Добро пожаловать в Shooter!*\n\n"
+        "🎯 <b>Добро пожаловать в Shooter!</b>\n\n"
         "Это канал автоматического торгового бота на ETH.\n\n"
-        "📊 *Что здесь будет:*\n"
+        "📊 <b>Что здесь будет:</b>\n"
         "• Обзор рынка ETH каждые 4 часа\n"
         "• Сигналы BUY с правилами\n"
         "• Результаты сделок\n"
         "• Статистика Winrate и P&L\n\n"
-        "📈 *Стратегия бота:*\n"
+        "📈 <b>Стратегия бота:</b>\n"
         "• RSI + CMF + EMA 200\n"
         "• Winrate 59.5% на 3.4 годах\n"
         "• +232% за период бэктеста\n\n"
