@@ -9,12 +9,14 @@ from flask import Flask
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
 CHAT_ID   = os.environ.get("CHAT_ID", "465503608")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1001182337455")
+CHANNEL_LINK = "t.me/shooter_eth_signals"
+BOT_LINK = "@Torkasch_bot"
 
 INTERVAL_SECONDS        = 180
 COOLDOWN_SECONDS        = 15 * 60
-FLAT_REPORT_SECONDS     = 4 * 60 * 60    # в личку — раз в 4 часа
-CHANNEL_POST_SECONDS    = 4 * 60 * 60    # в канал — раз в 4 часа
-WEEKLY_REPORT_SECONDS   = 7 * 24 * 60 * 60  # раз в неделю
+FLAT_REPORT_SECONDS     = 4 * 60 * 60
+CHANNEL_POST_SECONDS    = 4 * 60 * 60
+WEEKLY_REPORT_SECONDS   = 7 * 24 * 60 * 60
 
 URL_TELEGRAM = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
@@ -33,7 +35,7 @@ last_channel_post    = 0
 last_weekly_report   = 0
 last_ema_state       = None
 
-# === СТАТИСТИКА СДЕЛОК (для трекинга) ===
+# === СТАТИСТИКА СДЕЛОК ===
 active_trades = []
 closed_stats = {
     "total": 0, "wins": 0, "losses": 0,
@@ -56,7 +58,6 @@ def run_flask():
 
 # === TELEGRAM ===
 def send_telegram(text, target=None):
-    """Отправка в личку (по умолчанию) или в канал."""
     chat = target or CHAT_ID
     payload = {"chat_id": chat, "text": text, "parse_mode": "Markdown"}
     try:
@@ -159,7 +160,6 @@ def describe_cmf(value):
     else:               return f"CMF 1H = {value:+.3f} → 🐋 нейтрально"
 
 
-# === СИГНАЛ ===
 def check_signal(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
     if ema_200 is None:
         return False, "EMA 200 не рассчитана"
@@ -170,7 +170,7 @@ def check_signal(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
         "Цена > EMA 200": price > ema_200,
     }
     if all(conditions.values()):
-        return True, "все условия выполнены"
+        return True, "все условия"
     failed = [k for k, v in conditions.items() if not v]
     return False, f"нет: {', '.join(failed)}"
 
@@ -209,7 +209,6 @@ def check_active_trades(current_price):
             entry_time = datetime.fromtimestamp(trade["time"]).strftime("%d.%m %H:%M")
             exit_time = datetime.now().strftime("%d.%m %H:%M")
 
-            # В личку
             text = (
                 f"{emoji} *СДЕЛКА ЗАКРЫТА {label}*\n\n"
                 f"🟢 BUY ETH\n"
@@ -225,16 +224,17 @@ def check_active_trades(current_price):
                 f"• Прибыльных: {closed_stats['wins']}\n"
                 f"• Убыточных: {closed_stats['losses']}\n"
                 f"• Winrate: {winrate:.1f}%\n"
-                f"• Общий P&L: {closed_stats['total_pnl']:+.2f}%"
+                f"• Общий P&L: {closed_stats['total_pnl']:+.2f}%\n\n"
+                f"📢 _{CHANNEL_LINK}_"
             )
             send_telegram(text)
 
-            # В канал — короткая версия
             channel_text = (
                 f"{emoji} *Сделка закрыта {label}*\n\n"
                 f"🟢 BUY ETH: ${entry:.2f} → ${current_price:.2f}\n"
                 f"📊 P&L: {pnl_net:+.2f}%\n\n"
-                f"📈 Всего сделок: {total} | Winrate: {winrate:.1f}%"
+                f"📈 Всего сделок: {total} | Winrate: {winrate:.1f}%\n\n"
+                f"🤖 _Личные сигналы: {BOT_LINK}_"
             )
             send_to_channel(channel_text)
         else:
@@ -258,21 +258,23 @@ def check_ema_state(price, ema_200):
                 f"🚀 *ETH ПРОБИЛ EMA 200 (1D) ВВЕРХ*\n\n"
                 f"💵 Цена: ${price:.2f}\n"
                 f"📊 EMA 200: ${ema_200:.2f}\n\n"
-                f"✅ *Бычий тренд активирован.*"
+                f"✅ *Бычий тренд активирован.*\n\n"
+                f"🤖 _{BOT_LINK}_"
             )
         else:
             msg = (
                 f"⚠️ *ETH УПАЛ НИЖЕ EMA 200 (1D)*\n\n"
                 f"💵 Цена: ${price:.2f}\n"
                 f"📊 EMA 200: ${ema_200:.2f}\n\n"
-                f"🛑 *BUY-сигналы приостановлены.*"
+                f"🛑 *BUY-сигналы приостановлены.*\n\n"
+                f"🤖 _{BOT_LINK}_"
             )
         send_telegram(msg)
         send_to_channel(msg)
         last_ema_state = current
 
 
-# === ОТЧЁТ О ФЛЕТЕ (в личку, раз в 4 часа) ===
+# === ОТЧЁТ О ФЛЕТЕ ===
 def send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
     global last_flat_report
     now = time.time()
@@ -291,13 +293,13 @@ def send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
         f"\n*🐋 CMF (20)*\n"
         f"• {describe_cmf(cmf_1h)}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"\n🤖 _Следующий отчёт через 4 часа._"
+        f"\n📢 _Канал: {CHANNEL_LINK}_"
     )
     send_telegram(text)
     last_flat_report = now
 
 
-# === ПОСТ В КАНАЛ (раз в 4 часа) ===
+# === ПОСТ В КАНАЛ ===
 def send_channel_update(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
     global last_channel_post
     now = time.time()
@@ -307,7 +309,6 @@ def send_channel_update(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
     above = "✅" if ema_200 and price > ema_200 else "❌"
     ema_str = f"${ema_200:.2f}" if ema_200 else "?"
 
-    # Определяем "настроение" рынка
     if rsi_1d > 55 and cmf_1h > 0.01:
         mood = "🟢 Бычий настрой"
     elif rsi_1d < 45 and cmf_1h < -0.01:
@@ -325,7 +326,8 @@ def send_channel_update(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
         f"• 1D: {rsi_1d:.1f}\n\n"
         f"*🐋 CMF (20) 1H:* {cmf_1h:+.3f}\n\n"
         f"*Настроение:* {mood}\n\n"
-        f"🎯 _Сигналов нет. Бот ждёт условий._"
+        f"🎯 _Сигналов нет. Бот ждёт условий._\n\n"
+        f"🤖 _Личные сигналы: {BOT_LINK}_"
     )
     send_to_channel(text)
     last_channel_post = now
@@ -340,7 +342,12 @@ def send_weekly_report():
 
     total = closed_stats["total"]
     if total == 0:
-        text = "📊 *Недельная сводка*\n\nЗа неделю сигналов не было. Бот продолжает ждать."
+        text = (
+            "📊 *Недельная сводка*\n\n"
+            "За неделю сигналов не было.\n"
+            "Бот продолжает ждать условий.\n\n"
+            f"🤖 _{BOT_LINK}_"
+        )
     else:
         winrate = closed_stats["wins"] / total * 100
         text = (
@@ -349,7 +356,8 @@ def send_weekly_report():
             f"• Прибыльных: {closed_stats['wins']}\n"
             f"• Убыточных: {closed_stats['losses']}\n"
             f"• Winrate: {winrate:.1f}%\n"
-            f"• Общий P&L: {closed_stats['total_pnl']:+.2f}%"
+            f"• Общий P&L: {closed_stats['total_pnl']:+.2f}%\n\n"
+            f"🤖 _{BOT_LINK}_"
         )
     send_to_channel(text)
     send_telegram(text)
@@ -384,13 +392,9 @@ def main_analysis():
         flush=True
     )
 
-    # 1. Проверка смены тренда
     check_ema_state(price, ema_200)
-
-    # 2. Трекинг активных сделок
     check_active_trades(price)
 
-    # 3. Проверка сигнала
     is_signal, reason = check_signal(rsi_1h, rsi_1d, cmf_1h, price, ema_200)
 
     if is_signal:
@@ -416,7 +420,8 @@ def main_analysis():
             f"\n*📈 EMA 200 (1D):* ${ema_200:.2f} ✅\n"
             f"━━━━━━━━━━━━━━━\n"
             f"\n🎯 *ВСЕ УСЛОВИЯ ВЫПОЛНЕНЫ*\n"
-            f"📊 _Winrate: 59.5%_"
+            f"📊 _Winrate: 59.5%_\n\n"
+            f"📢 _{CHANNEL_LINK}_"
         )
         send_telegram(text)
         send_to_channel(text)
@@ -430,7 +435,6 @@ def main_analysis():
         last_signal_time["BUY"] = now
         return
 
-    # 4. Отчёты
     send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200)
     send_channel_update(rsi_1h, rsi_1d, cmf_1h, price, ema_200)
     send_weekly_report()
@@ -449,22 +453,25 @@ if __name__ == "__main__":
         "• ✅ Результат каждой сделки\n"
         "• 💤 Отчёты о рынке раз в 4 часа\n"
         "• 🔄 Уведомления о смене тренда\n\n"
-        "📢 _Публикую обзоры в канал раз в 4 часа._"
+        f"📢 *Канал:* {CHANNEL_LINK}"
     )
 
-    if CHANNEL_ID and CHANNEL_ID != "-1001182337455":
-        print(f"📢 Канал: {CHANNEL_ID}", flush=True)
-    elif CHANNEL_ID == "-1001182337455":
-        print(f"📢 Канал настроен: {CHANNEL_ID}", flush=True)
-        send_to_channel(
-            "📢 *Shooter в вашем канале!*\n\n"
-            "Теперь здесь будет публиковаться:\n"
-            "• 📊 Обзор рынка ETH раз в 4 часа\n"
-            "• 🟢 BUY-сигналы с правилами\n"
-            "• ✅ Результаты сделок\n"
-            "• 🔄 Уведомления о смене тренда\n\n"
-            "🤖 _Shooter — торговый бот на ETH._"
-        )
+    print(f"📢 Канал: {CHANNEL_ID}", flush=True)
+    send_to_channel(
+        "🎯 *Добро пожаловать в Shooter!*\n\n"
+        "Это канал автоматического торгового бота на ETH.\n\n"
+        "📊 *Что здесь будет:*\n"
+        "• Обзор рынка ETH каждые 4 часа\n"
+        "• Сигналы BUY с правилами\n"
+        "• Результаты сделок\n"
+        "• Статистика Winrate и P&L\n\n"
+        "📈 *Стратегия бота:*\n"
+        "• RSI + CMF + EMA 200\n"
+        "• Winrate 59.5% на 3.4 годах\n"
+        "• +232% за период бэктеста\n\n"
+        f"🤖 *Личные сигналы от бота:* {BOT_LINK}\n\n"
+        "⚠️ _Не финансовая рекомендация. Торговля связана с риском._"
+    )
 
     print("🧵 Flask-поток...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
