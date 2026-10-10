@@ -143,6 +143,12 @@ def send_telegram(text, target=None):
 def send_to_channel(text):
     return send_telegram(text, target=CHANNEL_ID)
 
+def send_twitter_ready(text):
+    """Отправляет в личку готовое сообщение для Twitter (копируй целиком)."""
+    header = "📋 <b>СКОПИРУЙ ДЛЯ TWITTER:</b>\n\n"
+    full = header + f"<code>{text}</code>"
+    send_telegram(full)
+
 def fetch_okx(url, label):
     try:
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
@@ -234,7 +240,7 @@ def check_active_trades(current_price):
             winrate = closed_stats["wins"] / total * 100
             entry_time = datetime.fromtimestamp(trade["time"]).strftime("%d.%m %H:%M")
 
-            # Двуязычное сообщение
+            # Telegram-сообщение (двуязычное)
             text = (f"{emoji} <b>СДЕЛКА ЗАКРЫТА {label_ru}</b> / <b>TRADE CLOSED {label_en}</b>\n\n"
                     f"🇷🇺 RU:\n"
                     f"🟢 BUY ETH\n"
@@ -259,6 +265,17 @@ def check_active_trades(current_price):
 
             send_telegram(text)
             send_to_channel(text)
+
+            # 🐦 Twitter-версия
+            twitter_text = (
+                f"{emoji} ETH trade closed\n\n"
+                f"Entry: ${entry:.2f}\n"
+                f"Exit: ${current_price:.2f}\n"
+                f"P&L: {pnl_net:+.2f}%\n\n"
+                f"Winrate: {winrate:.1f}% | Total P&L: {closed_stats['total_pnl']:+.2f}%\n\n"
+                f"#ETH #crypto #trading"
+            )
+            send_twitter_ready(twitter_text)
             state_changed = True
         else:
             still_open.append(trade)
@@ -286,6 +303,25 @@ def check_ema_state(price, ema_200):
                    f"🤖 {BOT_LINK}")
         send_telegram(msg)
         send_to_channel(msg)
+
+        # 🐦 Twitter-версия
+        if current == "above":
+            twitter_text = (
+                f"🚀 ETH broke above EMA 200\n\n"
+                f"Price: ${price:.2f}\n"
+                f"EMA 200: ${ema_200:.2f}\n\n"
+                f"Bullish trend activated ✅\n\n"
+                f"#ETH #crypto"
+            )
+        else:
+            twitter_text = (
+                f"⚠️ ETH fell below EMA 200\n\n"
+                f"Price: ${price:.2f}\n"
+                f"EMA 200: ${ema_200:.2f}\n\n"
+                f"BUY signals paused 🛑\n\n"
+                f"#ETH #crypto"
+            )
+        send_twitter_ready(twitter_text)
         last_ema_state = current
         save_state()
 
@@ -322,6 +358,7 @@ def main_analysis():
         target = price * (1 + TRADE_TAKE_PROFIT_PCT)
         stop = price * (1 - TRADE_STOP_LOSS_PCT)
 
+        # Telegram (двуязычное)
         text = (f"🟢 <b>РЕКОМЕНДАЦИЯ: ПОКУПАТЬ ETH</b> / <b>RECOMMENDATION: BUY ETH</b>\n\n"
                 f"🇷🇺 <b>RU:</b>\n"
                 f"💵 Вход: ${price:.2f}\n"
@@ -346,6 +383,20 @@ def main_analysis():
 
         send_telegram(text)
         send_to_channel(text)
+
+        # 🐦 Twitter-версия
+        twitter_text = (
+            f"🟢 ETH BUY signal\n\n"
+            f"Entry: ${price:.2f}\n"
+            f"🎯 TP: ${target:.2f} (+2%)\n"
+            f"⛔ SL: ${stop:.2f} (-2%)\n"
+            f"⏱ 48h horizon\n\n"
+            f"RSI 1H: {rsi_1h:.1f} | RSI 1D: {rsi_1d:.1f}\n"
+            f"CMF: {cmf_1h:+.3f}\n"
+            f"Above EMA 200 ✅\n\n"
+            f"#ETH #crypto #trading"
+        )
+        send_twitter_ready(twitter_text)
 
         active_trades.append({"entry": price, "time": now, "type": "BUY"})
         log.info(f"📌 Сделка открыта: ${price:.2f}")
@@ -373,6 +424,18 @@ def main_analysis():
         )
         last_flat_report = now
 
+        # 🐦 Twitter-версия
+        twitter_text = (
+            f"💤 ETH — no signal\n\n"
+            f"Price: ${price:.2f}\n"
+            f"EMA 200: ${ema_200:.2f} ✅\n\n"
+            f"RSI 1H: {rsi_1h:.1f} | RSI 1D: {rsi_1d:.1f}\n"
+            f"CMF: {cmf_1h:+.3f}\n\n"
+            f"Waiting for setup.\n\n"
+            f"#ETH #crypto"
+        )
+        send_twitter_ready(twitter_text)
+
     if now - last_channel_post > CHANNEL_POST_SECONDS:
         send_to_channel(
             f"📊 <b>ETH — обзор рынка / Market Overview</b>\n\n"
@@ -390,6 +453,18 @@ def main_analysis():
             f"🤖 {BOT_LINK}"
         )
         last_channel_post = now
+
+        # 🐦 Twitter-версия
+        twitter_text = (
+            f"📊 ETH market update\n\n"
+            f"Price: ${price:.2f}\n"
+            f"RSI 1H: {rsi_1h:.1f} | RSI 1D: {rsi_1d:.1f}\n"
+            f"CMF: {cmf_1h:+.3f}\n"
+            f"EMA 200: ${ema_200:.2f}\n\n"
+            f"No signal yet. Bot is watching.\n\n"
+            f"#ETH #crypto"
+        )
+        send_twitter_ready(twitter_text)
 
     last_successful_analysis = datetime.now().strftime("%H:%M:%S")
 
