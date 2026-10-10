@@ -8,14 +8,16 @@ from flask import Flask
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
 CHAT_ID   = os.environ.get("CHAT_ID", "465503608")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1001182337455")
 
-INTERVAL_SECONDS     = 180
-COOLDOWN_SECONDS     = 15 * 60
-FLAT_REPORT_SECONDS  = 60 * 60
+INTERVAL_SECONDS        = 180
+COOLDOWN_SECONDS        = 15 * 60
+FLAT_REPORT_SECONDS     = 4 * 60 * 60    # в личку — раз в 4 часа
+CHANNEL_POST_SECONDS    = 4 * 60 * 60    # в канал — раз в 4 часа
+WEEKLY_REPORT_SECONDS   = 7 * 24 * 60 * 60  # раз в неделю
 
 URL_TELEGRAM = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# OKX — работает с Render без блокировок
 OKX_1H = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=1H&limit=500"
 OKX_1D = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=1D&limit=300"
 
@@ -25,9 +27,18 @@ RSI_ENTRY_BUY  = 35
 CMF_BUY        = 0.01
 EMA_PERIOD     = 200
 
-last_signal_time = {"BUY": 0}
-last_flat_report = 0
-last_ema_state   = None
+last_signal_time     = {"BUY": 0}
+last_flat_report     = 0
+last_channel_post    = 0
+last_weekly_report   = 0
+last_ema_state       = None
+
+# === СТАТИСТИКА СДЕЛОК (для трекинга) ===
+active_trades = []
+closed_stats = {
+    "total": 0, "wins": 0, "losses": 0,
+    "total_pnl": 0.0, "history": []
+}
 
 
 # === FLASK ===
@@ -44,16 +55,24 @@ def run_flask():
 
 
 # === TELEGRAM ===
-def send_telegram(text_message):
-    payload = {"chat_id": CHAT_ID, "text": text_message, "parse_mode": "Markdown"}
+def send_telegram(text, target=None):
+    """Отправка в личку (по умолчанию) или в канал."""
+    chat = target or CHAT_ID
+    payload = {"chat_id": chat, "text": text, "parse_mode": "Markdown"}
     try:
         r = requests.post(URL_TELEGRAM, json=payload, timeout=15)
         if r.status_code != 200:
-            print(f"❌ Telegram: {r.text}", flush=True)
+            print(f"❌ Telegram ({chat}): {r.text[:200]}", flush=True)
         else:
-            print("✅ Сообщение отправлено", flush=True)
+            print(f"✅ Отправлено в {chat}", flush=True)
+        return r.status_code == 200
     except Exception as e:
         print(f"❌ Ошибка Telegram: {e}", flush=True)
+        return False
+
+
+def send_to_channel(text):
+    return send_telegram(text, target=CHANNEL_ID)
 
 
 # === OKX ===
@@ -66,7 +85,7 @@ def fetch_okx(url, label):
             return None
         data = r.json()
         if data.get("code") != "0" or "data" not in data:
-            print(f"⚠️ OKX {label} error: {data.get('msg', '?')}", flush=True)
+            print(f"⚠️ OKX {label} error", flush=True)
             return None
         rows = data["data"]
         if not rows:
@@ -77,7 +96,6 @@ def fetch_okx(url, label):
         lows    = [float(x[3]) for x in rows]
         closes  = [float(x[4]) for x in rows]
         volumes = [float(x[5]) for x in rows]
-        print(f"✅ OKX {label}: получено {len(closes)} свечей", flush=True)
         return opens, highs, lows, closes, volumes
     except Exception as e:
         print(f"⚠️ OKX {label} exception: {e}", flush=True)
@@ -133,29 +151,99 @@ def describe_rsi(value, tf):
     else:             return f"RSI {tf} = {value:.1f} → 📉 медвежий"
 
 
-def describe_cmf(value, tf):
-    if value > 0.05:    return f"CMF {tf} = {value:+.3f} → 🐋 сильный приток"
-    elif value > 0.01:  return f"CMF {tf} = {value:+.3f} → 🐋 умеренный приток"
-    elif value < -0.05: return f"CMF {tf} = {value:+.3f} → 🐋 сильный отток"
-    elif value < -0.01: return f"CMF {tf} = {value:+.3f} → 🐋 умеренный отток"
-    else:               return f"CMF {tf} = {value:+.3f} → 🐋 нейтрально"
+def describe_cmf(value):
+    if value > 0.05:    return f"CMF 1H = {value:+.3f} → 🐋 сильный приток"
+    elif value > 0.01:  return f"CMF 1H = {value:+.3f} → 🐋 умеренный приток"
+    elif value < -0.05: return f"CMF 1H = {value:+.3f} → 🐋 сильный отток"
+    elif value < -0.01: return f"CMF 1H = {value:+.3f} → 🐋 умеренный отток"
+    else:               return f"CMF 1H = {value:+.3f} → 🐋 нейтрально"
 
 
+# === СИГНАЛ ===
 def check_signal(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
     if ema_200 is None:
         return False, "EMA 200 не рассчитана"
     conditions = {
-        "RSI 1D > 50":  rsi_1d > RSI_TREND_BULL,
-        "RSI 1H < 35":  rsi_1h < RSI_ENTRY_BUY,
-        "CMF 1H > 0.01": cmf_1h > CMF_BUY,
+        "RSI 1D > 50":    rsi_1d > RSI_TREND_BULL,
+        "RSI 1H < 35":    rsi_1h < RSI_ENTRY_BUY,
+        "CMF 1H > 0.01":  cmf_1h > CMF_BUY,
         "Цена > EMA 200": price > ema_200,
     }
     if all(conditions.values()):
-        return True, "все условия"
+        return True, "все условия выполнены"
     failed = [k for k, v in conditions.items() if not v]
     return False, f"нет: {', '.join(failed)}"
 
 
+# === ТРЕКИНГ СДЕЛОК ===
+def check_active_trades(current_price):
+    global active_trades
+    now = time.time()
+    still_open = []
+
+    for trade in active_trades:
+        elapsed_hours = (now - trade["time"]) / 3600
+
+        if elapsed_hours >= 48:
+            entry = trade["entry"]
+            pnl_pct = (current_price - entry) / entry * 100
+            pnl_net = pnl_pct - 0.2
+
+            closed_stats["total"] += 1
+            closed_stats["total_pnl"] += pnl_net
+            if pnl_net > 0:
+                closed_stats["wins"] += 1
+                emoji, label = "✅", "В ПЛЮС"
+            else:
+                closed_stats["losses"] += 1
+                emoji, label = "❌", "В МИНУС"
+
+            closed_stats["history"].append({
+                "entry": entry, "exit": current_price,
+                "pnl": pnl_net, "time": trade["time"]
+            })
+
+            total = closed_stats["total"]
+            winrate = closed_stats["wins"] / total * 100 if total else 0
+
+            entry_time = datetime.fromtimestamp(trade["time"]).strftime("%d.%m %H:%M")
+            exit_time = datetime.now().strftime("%d.%m %H:%M")
+
+            # В личку
+            text = (
+                f"{emoji} *СДЕЛКА ЗАКРЫТА {label}*\n\n"
+                f"🟢 BUY ETH\n"
+                f"📅 Открыта: {entry_time}\n"
+                f"📅 Закрыта: {exit_time}\n\n"
+                f"💵 Вход: ${entry:.2f}\n"
+                f"💵 Выход: ${current_price:.2f}\n"
+                f"📊 P&L: {pnl_net:+.2f}%\n"
+                f"⏱ Удержание: 48ч\n\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"📊 *ОБЩАЯ СТАТИСТИКА:*\n"
+                f"• Всего: {total}\n"
+                f"• Прибыльных: {closed_stats['wins']}\n"
+                f"• Убыточных: {closed_stats['losses']}\n"
+                f"• Winrate: {winrate:.1f}%\n"
+                f"• Общий P&L: {closed_stats['total_pnl']:+.2f}%"
+            )
+            send_telegram(text)
+
+            # В канал — короткая версия
+            channel_text = (
+                f"{emoji} *Сделка закрыта {label}*\n\n"
+                f"🟢 BUY ETH: ${entry:.2f} → ${current_price:.2f}\n"
+                f"📊 P&L: {pnl_net:+.2f}%\n\n"
+                f"📈 Всего сделок: {total} | Winrate: {winrate:.1f}%"
+            )
+            send_to_channel(channel_text)
+        else:
+            still_open.append(trade)
+
+    active_trades = still_open
+
+
+# === СМЕНА EMA ===
 def check_ema_state(price, ema_200):
     global last_ema_state
     if ema_200 is None:
@@ -166,22 +254,25 @@ def check_ema_state(price, ema_200):
         return
     if current != last_ema_state:
         if current == "above":
-            send_telegram(
+            msg = (
                 f"🚀 *ETH ПРОБИЛ EMA 200 (1D) ВВЕРХ*\n\n"
                 f"💵 Цена: ${price:.2f}\n"
                 f"📊 EMA 200: ${ema_200:.2f}\n\n"
                 f"✅ *Бычий тренд активирован.*"
             )
         else:
-            send_telegram(
+            msg = (
                 f"⚠️ *ETH УПАЛ НИЖЕ EMA 200 (1D)*\n\n"
                 f"💵 Цена: ${price:.2f}\n"
                 f"📊 EMA 200: ${ema_200:.2f}\n\n"
                 f"🛑 *BUY-сигналы приостановлены.*"
             )
+        send_telegram(msg)
+        send_to_channel(msg)
         last_ema_state = current
 
 
+# === ОТЧЁТ О ФЛЕТЕ (в личку, раз в 4 часа) ===
 def send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
     global last_flat_report
     now = time.time()
@@ -198,12 +289,71 @@ def send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
         f"• {describe_rsi(rsi_1h, '1H')}\n"
         f"• {describe_rsi(rsi_1d, '1D')}\n"
         f"\n*🐋 CMF (20)*\n"
-        f"• {describe_cmf(cmf_1h, '1H')}\n"
+        f"• {describe_cmf(cmf_1h)}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"\n🤖 _Следующий отчёт через час._"
+        f"\n🤖 _Следующий отчёт через 4 часа._"
     )
     send_telegram(text)
     last_flat_report = now
+
+
+# === ПОСТ В КАНАЛ (раз в 4 часа) ===
+def send_channel_update(rsi_1h, rsi_1d, cmf_1h, price, ema_200):
+    global last_channel_post
+    now = time.time()
+    if now - last_channel_post < CHANNEL_POST_SECONDS:
+        return
+
+    above = "✅" if ema_200 and price > ema_200 else "❌"
+    ema_str = f"${ema_200:.2f}" if ema_200 else "?"
+
+    # Определяем "настроение" рынка
+    if rsi_1d > 55 and cmf_1h > 0.01:
+        mood = "🟢 Бычий настрой"
+    elif rsi_1d < 45 and cmf_1h < -0.01:
+        mood = "🔴 Медвежий настрой"
+    else:
+        mood = "⚪️ Нейтральный"
+
+    text = (
+        f"📊 *ETH — обзор рынка*\n"
+        f"_{datetime.now().strftime('%d.%m %H:%M')}_\n\n"
+        f"💵 *Цена:* ${price:.2f}\n"
+        f"📊 *EMA 200 (1D):* {ema_str} {above}\n\n"
+        f"*📈 RSI (14):*\n"
+        f"• 1H: {rsi_1h:.1f}\n"
+        f"• 1D: {rsi_1d:.1f}\n\n"
+        f"*🐋 CMF (20) 1H:* {cmf_1h:+.3f}\n\n"
+        f"*Настроение:* {mood}\n\n"
+        f"🎯 _Сигналов нет. Бот ждёт условий._"
+    )
+    send_to_channel(text)
+    last_channel_post = now
+
+
+# === НЕДЕЛЬНАЯ СВОДКА ===
+def send_weekly_report():
+    global last_weekly_report
+    now = time.time()
+    if now - last_weekly_report < WEEKLY_REPORT_SECONDS:
+        return
+
+    total = closed_stats["total"]
+    if total == 0:
+        text = "📊 *Недельная сводка*\n\nЗа неделю сигналов не было. Бот продолжает ждать."
+    else:
+        winrate = closed_stats["wins"] / total * 100
+        text = (
+            f"📊 *Недельная сводка*\n\n"
+            f"• Сделок: {total}\n"
+            f"• Прибыльных: {closed_stats['wins']}\n"
+            f"• Убыточных: {closed_stats['losses']}\n"
+            f"• Winrate: {winrate:.1f}%\n"
+            f"• Общий P&L: {closed_stats['total_pnl']:+.2f}%"
+        )
+    send_to_channel(text)
+    send_telegram(text)
+    last_weekly_report = now
 
 
 # === ГЛАВНЫЙ ЦИКЛ ===
@@ -234,8 +384,13 @@ def main_analysis():
         flush=True
     )
 
+    # 1. Проверка смены тренда
     check_ema_state(price, ema_200)
 
+    # 2. Трекинг активных сделок
+    check_active_trades(price)
+
+    # 3. Проверка сигнала
     is_signal, reason = check_signal(rsi_1h, rsi_1d, cmf_1h, price, ema_200)
 
     if is_signal:
@@ -249,43 +404,68 @@ def main_analysis():
             f"🟢 *РЕКОМЕНДАЦИЯ: ПОКУПАТЬ ETH*\n\n"
             f"💵 *Цена входа:* ${price:.2f}\n"
             f"🎯 *Цель (48ч):* ${target:.2f} (+2%)\n"
-            f"⏱ *Горизонт:* 48 часов\n\n"
+            f"⛔ *Стоп-лосс:* ${price * 0.98:.2f} (−2%)\n"
+            f"⏱ *Горизонт:* 48 часов\n"
+            f"📊 *Размер:* 5% от депозита\n\n"
             f"━━━━━━━━━━━━━━━\n"
             f"*📊 RSI (14)*\n"
             f"• {describe_rsi(rsi_1h, '1H')}\n"
             f"• {describe_rsi(rsi_1d, '1D')}\n"
             f"\n*🐋 CMF (20)*\n"
-            f"• {describe_cmf(cmf_1h, '1H')}\n"
+            f"• {describe_cmf(cmf_1h)}\n"
             f"\n*📈 EMA 200 (1D):* ${ema_200:.2f} ✅\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"\n🎯 *ВСЕ УСЛОВИЯ ВЫПОЛНЕНЫ:*\n"
-            f"• RSI 1D > 50 — старший тренд бычий\n"
-            f"• RSI 1H < 35 — перепроданность\n"
-            f"• CMF 1H > 0.01 — капитал заходит\n"
-            f"• Цена > EMA 200 — глобальный тренд вверх\n\n"
+            f"\n🎯 *ВСЕ УСЛОВИЯ ВЫПОЛНЕНЫ*\n"
             f"📊 _Winrate: 59.5%_"
         )
         send_telegram(text)
+        send_to_channel(text)
+
+        active_trades.append({
+            "entry": price,
+            "time": now,
+            "type": "BUY"
+        })
+        print(f"📌 Сделка добавлена: ${price:.2f}", flush=True)
         last_signal_time["BUY"] = now
         return
 
+    # 4. Отчёты
     send_flat_report(rsi_1h, rsi_1d, cmf_1h, price, ema_200)
+    send_channel_update(rsi_1h, rsi_1d, cmf_1h, price, ema_200)
+    send_weekly_report()
 
 
 # === СТАРТ ===
 if __name__ == "__main__":
-    print("🚀 ETH-бот запущен на Render...", flush=True)
+    print("🚀 Shooter запущен на Render...", flush=True)
     send_telegram(
-        "🎯 *Shooter: ETH-бот запущен!*\n\n"
-        "🔧 *Стратегия:*\n"
-        "• Монета: ETH/USDT\n"
-        "• Индикаторы: RSI + CMF + EMA 200\n"
-        "• Таймфреймы: 1H + 1D\n"
-        "• Сигналы: только BUY\n"
-        "• Горизонт: 48 часов\n\n"
-        "📊 *Бэктест (3.4 года):* Winrate 59.5%, +232%\n"
-        "✅ *Все годы в плюсе*"
+        "🎯 *Shooter запущен!*\n\n"
+        "🔧 *Стратегия:* ETH / RSI + CMF + EMA 200\n"
+        "📊 *Winrate:* 59.5% (3.4 года)\n"
+        "📈 *Результат:* +232%\n\n"
+        "📩 *Что присылаю:*\n"
+        "• 🟢 BUY-сигналы с правилами\n"
+        "• ✅ Результат каждой сделки\n"
+        "• 💤 Отчёты о рынке раз в 4 часа\n"
+        "• 🔄 Уведомления о смене тренда\n\n"
+        "📢 _Публикую обзоры в канал раз в 4 часа._"
     )
+
+    if CHANNEL_ID and CHANNEL_ID != "-1001182337455":
+        print(f"📢 Канал: {CHANNEL_ID}", flush=True)
+    elif CHANNEL_ID == "-1001182337455":
+        print(f"📢 Канал настроен: {CHANNEL_ID}", flush=True)
+        send_to_channel(
+            "📢 *Shooter в вашем канале!*\n\n"
+            "Теперь здесь будет публиковаться:\n"
+            "• 📊 Обзор рынка ETH раз в 4 часа\n"
+            "• 🟢 BUY-сигналы с правилами\n"
+            "• ✅ Результаты сделок\n"
+            "• 🔄 Уведомления о смене тренда\n\n"
+            "🤖 _Shooter — торговый бот на ETH._"
+        )
+
     print("🧵 Flask-поток...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
     print("🔁 Цикл анализа...", flush=True)
